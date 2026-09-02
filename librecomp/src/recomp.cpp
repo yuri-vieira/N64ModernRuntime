@@ -618,7 +618,18 @@ extern "C" uint8_t* recomp_tlb_translate(uint8_t* rdram, uint32_t addr) {
         return rdram + rdram_offset;
     }
 
-    fprintf(stderr, "[TLB] miss translating virtual address 0x%08X (no matching soft TLB entry)\n", addr);
+    // No configured TLB entry covers this address. Rather than treat that
+    // as an error, fall back to identity-mapping it onto RDRAM directly --
+    // low-level code that runs before (or without ever) setting up its own
+    // TLB entries (e.g. a boot-time RAM size probe) commonly addresses
+    // physical memory this way, expecting VPN == PFN for anything it hasn't
+    // explicitly remapped. This only fails to be "correct" for a genuine
+    // unmapped-address access, which would fault on real hardware anyway.
+    if (addr < recomp::mem_size) {
+        return rdram + addr;
+    }
+
+    fprintf(stderr, "[TLB] miss translating virtual address 0x%08X (no matching soft TLB entry, and out of RDRAM range)\n", addr);
     static uint8_t scratch_page[4096];
     return scratch_page;
 }

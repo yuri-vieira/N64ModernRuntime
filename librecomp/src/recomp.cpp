@@ -11,6 +11,7 @@
 #include <optional>
 #include <mutex>
 #include <array>
+#include <atomic>
 #include <cinttypes>
 #include <cuchar>
 #include <charconv>
@@ -414,9 +415,32 @@ extern "C" void osGetMemSize_recomp(uint8_t * rdram, recomp_context * ctx) {
     ctx->r2 = 8 * 1024 * 1024;
 }
 
-enum class StatusReg {
+enum class StatusReg : uint32_t {
     FR = 0x04000000,
+    // Coprocessor usable bits (CU0-CU3, bits 28-31). The recompiled code
+    // never checks these before executing an instruction for the
+    // corresponding coprocessor (e.g. float instructions always execute
+    // regardless of CU1), so there's nothing to emulate -- just don't
+    // treat them as unexpected/fatal when a game's boot code sets them.
+    CoprocessorUsableMask = 0xF0000000u,
 };
+
+// Real hardware has a single physical COP0, shared by every "thread" (they're
+// cooperatively scheduled on the one real CPU) -- a context switch saves and
+// restores Status as part of each thread's own saved context, so a bit set
+// by one thread (typically once at boot, and essentially never toggled
+// again) is visible to every thread that runs afterward. Our threads are
+// backed by separate host threads with their own independent recomp_context
+// each, so mips3_float_mode has to be mirrored here and applied to each new
+// context as it's created (see run_thread_function) rather than assumed to
+// start false like every other per-thread field.
+static std::atomic<bool> g_global_mips3_float_mode{ false };
+
+static bool get_global_mips3_float_mode() {
+    return g_global_mips3_float_mode.load();
+}
+
+extern "C" uint8_t g_recomp_fake_hw_regs[0x1000000]{};
 
 extern "C" void cop0_status_write(recomp_context* ctx, gpr value) {
     uint32_t old_sr = ctx->status_reg;
@@ -437,10 +461,15 @@ extern "C" void cop0_status_write(recomp_context* ctx, gpr value) {
             ctx->f_odd = &ctx->f0.u32h;
             ctx->mips3_float_mode = false;
         }
+        g_global_mips3_float_mode.store(ctx->mips3_float_mode != 0);
 
         // Remove the FR bit from the changed bits as it's been handled
         changed &= ~(uint32_t)StatusReg::FR;
     }
+
+    // Coprocessor usable bits are meaningless to this emulation model (see
+    // the enum comment) -- accept and ignore them.
+    changed &= ~(uint32_t)StatusReg::CoprocessorUsableMask;
 
     // If any other bits were changed, assert false as they're not handled currently
     if (changed) {
@@ -633,8 +662,11 @@ void run_thread_function(uint8_t* rdram, uint64_t addr, uint64_t sp, uint64_t ar
     recomp_context ctx{};
     ctx.r29 = sp;
     ctx.r4 = arg;
-    ctx.mips3_float_mode = 0;
-    ctx.f_odd = &ctx.f0.u32h;
+    // See cop0_status_write: FR is effectively global on real hardware, so a
+    // newly created thread should start with whatever the rest of the game
+    // already configured rather than always defaulting to false.
+    ctx.mips3_float_mode = get_global_mips3_float_mode();
+    ctx.f_odd = ctx.mips3_float_mode ? &ctx.f1.u32l : &ctx.f0.u32h;
 
     if (game_entry.thread_create_callback != nullptr) {
         game_entry.thread_create_callback(rdram, &ctx);

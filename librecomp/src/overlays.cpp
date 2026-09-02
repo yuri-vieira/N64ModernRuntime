@@ -12,6 +12,12 @@
 #include "overlays.hpp"
 #include "sections.h"
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <Windows.h>
+#include <DbgHelp.h>
+#endif
+
 static recomp::overlays::overlay_section_table_data_t sections_info {};
 static recomp::overlays::overlays_by_index_t overlays_info {};
 
@@ -370,6 +376,24 @@ extern "C" recomp_func_t * get_function(int32_t addr) {
     auto func_find = func_map.find(addr);
     if (func_find == func_map.end()) {
         fprintf(stderr, "Failed to find function at 0x%08X\n", addr);
+#ifdef _WIN32
+        void* trace[16];
+        USHORT frames = CaptureStackBackTrace(0, 16, trace, nullptr);
+        HANDLE process = GetCurrentProcess();
+        SymInitialize(process, nullptr, TRUE);
+        char buffer[sizeof(SYMBOL_INFO) + 512]{};
+        SYMBOL_INFO* symbol = (SYMBOL_INFO*)buffer;
+        symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+        symbol->MaxNameLen = 512;
+        for (USHORT i = 0; i < frames; i++) {
+            DWORD64 displacement = 0;
+            if (SymFromAddr(process, (DWORD64)trace[i], &displacement, symbol)) {
+                fprintf(stderr, "  #%u %s+0x%llX\n", i, symbol->Name, displacement);
+            } else {
+                fprintf(stderr, "  #%u 0x%p\n", i, trace[i]);
+            }
+        }
+#endif
         assert(false);
         std::exit(EXIT_FAILURE);
     }

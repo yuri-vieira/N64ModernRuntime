@@ -1,4 +1,5 @@
 #include <memory>
+#include <cstdio>
 #include <fstream>
 #include <array>
 #include <cstring>
@@ -12,6 +13,10 @@
 #include <ultramodern/ultramodern.hpp>
 
 static std::vector<uint8_t> rom;
+
+// Optional hook the consuming application can set to also mirror debug
+// prints from this file onto its own overlay/log, instead of only stdio.
+extern "C" void (*g_conker_debug_log_hook)(const char*) = nullptr;
 
 bool recomp::is_rom_loaded() {
     return !rom.empty();
@@ -63,6 +68,12 @@ extern "C" void osCreatePiManager_recomp(uint8_t* rdram, recomp_context* ctx) {
 
 void recomp::do_rom_read(uint8_t* rdram, gpr ram_address, uint32_t physical_addr, size_t num_bytes) {
     // TODO use word copies when possible
+    if (g_conker_debug_log_hook != nullptr) {
+        char buf[256];
+        snprintf(buf, sizeof(buf), "[DMA] ram=0x%llX phys=0x%X bytes=%zu",
+            (unsigned long long)ram_address, physical_addr, num_bytes);
+        g_conker_debug_log_hook(buf);
+    }
 
     // TODO handle misaligned DMA
     assert((physical_addr & 0x1) == 0 && "Only PI DMA from aligned ROM addresses is currently supported");

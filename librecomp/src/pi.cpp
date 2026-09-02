@@ -38,6 +38,25 @@ constexpr uint32_t phys_to_k1(uint32_t addr) {
     return addr | 0xA0000000;
 }
 
+// Cartridge domain 1 (physical 0x10000000+, i.e. KSEG0 0x90000000+ or KSEG1
+// 0xB0000000+) is memory-mapped on real hardware -- a plain lw/sw can read
+// or write it directly with no DMA setup, unlike do_rom_read/do_rom_pio
+// which model an explicit PI DMA transfer into RDRAM. Games are expected to
+// go through the PI manager for bulk transfers, but direct PIO reads of a
+// few words are common in low-level cart-status polling code (Conker's own
+// PI code does this). Returns nullptr if the address falls outside the
+// loaded ROM's extent.
+extern "C" uint8_t* recomp_cart_domain_ptr(uint32_t phys_addr) {
+    if (phys_addr < recomp::rom_base) {
+        return nullptr;
+    }
+    uint32_t rom_offset = phys_addr - recomp::rom_base;
+    if (rom_offset >= rom.size()) {
+        return nullptr;
+    }
+    return rom.data() + rom_offset;
+}
+
 extern "C" void __osPiGetAccess_recomp(uint8_t* rdram, recomp_context* ctx) {
 }
 

@@ -362,6 +362,11 @@ recomp_func_t* recomp::overlays::get_func_by_section_rom_function_vram(uint32_t 
 }
 
 extern "C" recomp_func_t * get_function(int32_t addr) {
+    // Some recompiled code computes call targets as KUSEG (TLB-mapped)
+    // addresses rather than the KSEG0 addresses the function table is keyed
+    // by; translate those before the lookup (a no-op for every ordinary
+    // KSEG0/KSEG1 address, i.e. every game that never sets up its own TLB).
+    addr = (int32_t)recomp_tlb_translate_to_kseg0((uint32_t)addr);
     auto func_find = func_map.find(addr);
     if (func_find == func_map.end()) {
         fprintf(stderr, "Failed to find function at 0x%08X\n", addr);

@@ -457,6 +457,159 @@ extern "C" gpr cop0_status_read(recomp_context* ctx) {
     return (gpr)(int32_t)ctx->status_reg;
 }
 
+// Software TLB: only ever populated by OS-level boot code that maps its own
+// virtual memory ranges (Conker's boot sets up TLB entries to reach its
+// compressed "game"/init segments via addresses like 0x10000000/0x15000000,
+// which are KUSEG addresses -- always TLB-translated on real hardware,
+// unlike the direct-mapped KSEG0/KSEG1 range every other recompiled game
+// uses exclusively). This models just enough of the real R4300i TLB entry
+// format (PageMask/EntryHi/EntryLo0/EntryLo1) to resolve those lookups;
+// ASID, cacheability, dirty/global bits, and TLB exceptions are not modeled.
+namespace {
+
+struct SoftTlbEntry {
+    bool valid = false;
+    uint32_t page_mask = 0;
+    uint32_t entry_hi = 0;
+    uint32_t entry_lo0 = 0;
+    uint32_t entry_lo1 = 0;
+};
+
+constexpr int kTlbEntryCount = 32;
+std::array<SoftTlbEntry, kTlbEntryCount> g_soft_tlb{};
+
+} // namespace
+
+extern "C" void cop0_reg_write(recomp_context* ctx, int cop0_reg, gpr value) {
+    uint32_t v = (uint32_t)value;
+    switch (cop0_reg) {
+        case 0:  ctx->tlb_index    = v; break; // Index
+        case 2:  ctx->tlb_entrylo0 = v; break; // EntryLo0
+        case 3:  ctx->tlb_entrylo1 = v; break; // EntryLo1
+        case 5:  ctx->tlb_pagemask = v; break; // PageMask
+        case 10: ctx->tlb_entryhi  = v; break; // EntryHi
+        default:
+            // Other cop0 registers aren't needed for TLB emulation; ignore.
+            break;
+    }
+}
+
+extern "C" gpr cop0_reg_read(recomp_context* ctx, int cop0_reg) {
+    switch (cop0_reg) {
+        case 0:  return (gpr)(int32_t)ctx->tlb_index;
+        case 2:  return (gpr)(int32_t)ctx->tlb_entrylo0;
+        case 3:  return (gpr)(int32_t)ctx->tlb_entrylo1;
+        case 5:  return (gpr)(int32_t)ctx->tlb_pagemask;
+        case 10: return (gpr)(int32_t)ctx->tlb_entryhi;
+        default: return 0;
+    }
+}
+
+extern "C" void do_tlbwi(recomp_context* ctx) {
+    uint32_t idx = ctx->tlb_index & 0x1F;
+    g_soft_tlb[idx] = SoftTlbEntry{
+        .valid = true,
+        .page_mask = ctx->tlb_pagemask,
+        .entry_hi = ctx->tlb_entryhi,
+        .entry_lo0 = ctx->tlb_entrylo0,
+        .entry_lo1 = ctx->tlb_entrylo1,
+    };
+}
+
+extern "C" void do_tlbwr(recomp_context* ctx) {
+    // No Random register decay is modeled -- reuse whatever Index currently
+    // holds. Boot code that relies on tlbwr for genuinely random eviction
+    // isn't a case Conker's fixed startup TLB setup needs.
+    do_tlbwi(ctx);
+}
+
+extern "C" void do_tlbp(recomp_context* ctx) {
+    uint32_t query_vpn2 = (ctx->tlb_entryhi >> 13) & 0x7FFFF;
+    for (int i = 0; i < kTlbEntryCount; i++) {
+        const SoftTlbEntry& e = g_soft_tlb[i];
+        if (!e.valid) {
+            continue;
+        }
+        uint32_t mask = e.page_mask >> 13;
+        uint32_t entry_vpn2 = (e.entry_hi >> 13) & 0x7FFFF;
+        if ((query_vpn2 | mask) == (entry_vpn2 | mask)) {
+            ctx->tlb_index = (uint32_t)i;
+            return;
+        }
+    }
+    ctx->tlb_index = 0x80000000u; // Probe failed (sets the TLB "P" bit).
+}
+
+namespace {
+
+// Shared TLB lookup: resolves a KUSEG virtual address to its RDRAM byte
+// offset (i.e. the offset that KSEG0 address 0x80000000 + offset would also
+// reach), or returns false if no soft TLB entry covers it.
+bool soft_tlb_resolve(uint32_t addr, uint32_t& rdram_offset_out) {
+    for (const SoftTlbEntry& e : g_soft_tlb) {
+        if (!e.valid) {
+            continue;
+        }
+
+        // page_mask's raw bits [24:13] mark which VPN bits vary across the
+        // mapped region; combined with the fixed 4KB (0x1000-1) offset bits,
+        // that gives the full address mask for this entry's region.
+        uint32_t region_mask = e.page_mask | 0x1FFF;
+        if ((addr & ~region_mask) != (e.entry_hi & ~region_mask)) {
+            continue;
+        }
+
+        // A single TLB entry maps two physically-independent pages (even/odd
+        // halves of the region, selected by the bit above the halfway
+        // point) via EntryLo0/EntryLo1 respectively.
+        uint32_t region_size = region_mask + 1;
+        uint32_t offset_in_region = addr & region_mask;
+        uint32_t half_size = region_size >> 1;
+        bool odd_half = offset_in_region >= half_size;
+        uint32_t entry_lo = odd_half ? e.entry_lo1 : e.entry_lo0;
+
+        if ((entry_lo & 0x2) == 0) {
+            // Valid bit clear: this half of the entry isn't actually mapped.
+            continue;
+        }
+
+        uint32_t pfn = (entry_lo >> 6) << 12;
+        uint32_t offset_in_half = offset_in_region & (half_size - 1);
+        rdram_offset_out = pfn + offset_in_half;
+        return true;
+    }
+    return false;
+}
+
+} // namespace
+
+extern "C" uint8_t* recomp_tlb_translate(uint8_t* rdram, uint32_t addr) {
+    uint32_t rdram_offset;
+    if (soft_tlb_resolve(addr, rdram_offset)) {
+        return rdram + rdram_offset;
+    }
+
+    fprintf(stderr, "[TLB] miss translating virtual address 0x%08X (no matching soft TLB entry)\n", addr);
+    static uint8_t scratch_page[4096];
+    return scratch_page;
+}
+
+// Recompiled code sometimes computes jump/call targets as KUSEG (TLB-mapped)
+// addresses instead of the KSEG0 addresses N64Recomp's own symbol
+// relocations use for the same code (Conker's boot code does this
+// deliberately, so the rest of boot can keep working through a fixed
+// virtual window regardless of where its segments end up physically -- see
+// func_10005AB0's TLB setup). The function lookup table is keyed by the
+// KSEG0-style address matching each section's natural vram, so translate
+// KUSEG lookups to their KSEG0 equivalent before searching it.
+extern "C" uint32_t recomp_tlb_translate_to_kseg0(uint32_t addr) {
+    uint32_t rdram_offset;
+    if ((addr & 0x80000000u) == 0 && soft_tlb_resolve(addr, rdram_offset)) {
+        return 0x80000000u | rdram_offset;
+    }
+    return addr;
+}
+
 extern "C" void switch_error(const char* func, uint32_t vram, uint32_t jtbl) {
     printf("Switch-case out of bounds in %s at 0x%08X for jump table at 0x%08X\n", func, vram, jtbl);
     assert(false);

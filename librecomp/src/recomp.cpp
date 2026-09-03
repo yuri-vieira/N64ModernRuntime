@@ -629,7 +629,14 @@ extern "C" uint8_t* recomp_tlb_translate(uint8_t* rdram, uint32_t addr) {
         return rdram + addr;
     }
 
-    fprintf(stderr, "[TLB] miss translating virtual address 0x%08X (no matching soft TLB entry, and out of RDRAM range)\n", addr);
+    // Rate-limited: a bad loop count/index can generate an enormous number
+    // of these in a tight loop, and logging every single one turns into
+    // the actual bottleneck (slowing execution enough to make it look
+    // hung). One line per burst is enough to know it's happening.
+    static std::atomic<int> miss_log_count{0};
+    if (miss_log_count.fetch_add(1) < 5) {
+        fprintf(stderr, "[TLB] miss translating virtual address 0x%08X (no matching soft TLB entry, and out of RDRAM range)\n", addr);
+    }
     static uint8_t scratch_page[4096];
     return scratch_page;
 }

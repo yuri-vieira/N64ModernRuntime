@@ -289,8 +289,16 @@ void task_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_r
         }
 
         if (!ultramodern::rsp::run_task(PASS_RDRAM task)) {
-            fprintf(stderr, "Failed to execute task type: %" PRIu32 "\n", task->t.type);
-            ULTRAMODERN_QUICK_EXIT();
+            // Recoverable: a ucode that doesn't fully recompile (e.g. an
+            // indirect jump target RSPRecomp's static analysis never
+            // discovered) is a real bug in that ucode's translation, but
+            // losing the whole process to it is worse than the alternative
+            // -- report it and let the game think the task finished anyway,
+            // same as get_function's missing-function recovery. The RDP
+            // command buffer for this task may be incomplete or entirely
+            // unprocessed, so expect visibly wrong or missing graphics
+            // output, not a crash, until the underlying gap is fixed.
+            fprintf(stderr, "Failed to execute task type: %" PRIu32 " (continuing)\n", task->t.type);
         }
 
         // Tell the game that the RSP has completed

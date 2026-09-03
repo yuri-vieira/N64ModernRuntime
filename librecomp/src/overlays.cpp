@@ -367,6 +367,14 @@ recomp_func_t* recomp::overlays::get_func_by_section_rom_function_vram(uint32_t 
     return get_func_by_section_index_function_offset(find_section_it->second, func_offset);
 }
 
+// Used by get_function's failure path below instead of aborting the whole
+// process -- an indirect call/jump target that can't be resolved (e.g. a
+// jump table entry populated from data that isn't correctly set up yet)
+// still needs *some* function to "return" to whatever expected a real one,
+// and immediately returning is a safe default for that.
+extern "C" RECOMP_FUNC void recomp_missing_function_stub(uint8_t* rdram, recomp_context* ctx) {
+}
+
 extern "C" recomp_func_t * get_function(int32_t addr) {
     // Some recompiled code computes call targets as KUSEG (TLB-mapped)
     // addresses rather than the KSEG0 addresses the function table is keyed
@@ -394,8 +402,12 @@ extern "C" recomp_func_t * get_function(int32_t addr) {
             }
         }
 #endif
-        assert(false);
-        std::exit(EXIT_FAILURE);
+        // Recoverable: return a safe no-op instead of aborting the whole
+        // process. This is a real bug (something computed a bogus function
+        // address), but it's better surfaced as "this one thing didn't
+        // work" than by losing the entire session -- see the stack trace
+        // just printed above for what to go fix.
+        return recomp_missing_function_stub;
     }
     return func_find->second;
 }

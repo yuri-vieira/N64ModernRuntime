@@ -35,11 +35,37 @@ typedef uint8_t u8;
 #  endif
 #else
 #  define PTR(x) int32_t
-#  define RDRAM_ARG uint8_t *rdram, 
+#  define RDRAM_ARG uint8_t *rdram,
 #  define RDRAM_ARG1 uint8_t *rdram
-#  define PASS_RDRAM rdram, 
+#  define PASS_RDRAM rdram,
 #  define PASS_RDRAM1 rdram
-#  define TO_PTR(type, var) ((type*)(&rdram[(uint64_t)var - 0xFFFFFFFF80000000]))
+#ifdef __cplusplus
+extern "C" {
+#endif
+// Defined in librecomp (recomp.cpp), shared with the software TLB that
+// recompiled game code already goes through via recomp_mem_addr/MEM_W.
+uint8_t* recomp_tlb_translate(uint8_t* rdram, uint32_t addr);
+#ifdef __cplusplus
+}
+#endif
+// The naive "subtract 0xFFFFFFFF80000000" translation below only works for
+// KSEG0/KSEG1 addresses (top bit set). Most PTR() values handed to
+// hand-written runtime code (thread stacks, message queue buffers, etc.)
+// are exactly that, which is why this went unnoticed for so long -- but
+// Conker maps some of its own segments into KUSEG (top bit clear) via a
+// real TLB it sets up itself, and a KUSEG pointer run through this formula
+// silently produces a wild, unrelated offset into rdram[] instead of an
+// error, corrupting memory or (if lucky) crashing far away from the actual
+// bug. Route through the same address translation recompiled code uses
+// instead of duplicating a second, incomplete copy of it here.
+static inline uint8_t* ultramodern_to_ptr(uint8_t* rdram, int32_t var) {
+    uint32_t addr = (uint32_t)var;
+    if (addr & 0x80000000u) {
+        return rdram + (addr & 0x1FFFFFFFu);
+    }
+    return recomp_tlb_translate(rdram, addr);
+}
+#  define TO_PTR(type, var) ((type*)ultramodern_to_ptr(rdram, (int32_t)(var)))
 #  define GET_MEMBER(type, addr, member) (addr + (intptr_t)&(((type*)nullptr)->member))
 #  ifdef __cplusplus
 #    define NULLPTR (PTR(void))0

@@ -65,3 +65,24 @@ PTR(OSThread) ultramodern::thread_queue_peek(RDRAM_ARG PTR(PTR(OSThread)) queue_
     PTR(OSThread)* queue = queue_to_ptr(PASS_RDRAM queue_);
     return *queue;
 }
+
+// Debug helper: the running queue is a priority-sorted (highest first)
+// singly linked list, so this walks it front-to-back and reports it in
+// scheduling order -- whatever's printed first is what run_next_thread
+// would pick next. Used to diagnose whether a low-priority thread is being
+// starved (always something higher-priority ready whenever a thread
+// blocks) versus genuinely stuck for some other reason.
+extern "C" void ultramodern_debug_dump_running_queue(uint8_t* rdram) {
+    PTR(OSThread) cur = running_queue_impl;
+    if (cur == NULLPTR) {
+        printf("[QUEUE] running queue is empty\n");
+        return;
+    }
+    printf("[QUEUE] running queue (front = next to run):");
+    while (cur != NULLPTR) {
+        OSThread* t = TO_PTR(OSThread, cur);
+        printf(" %d(pri=%d)", t->id, t->priority);
+        cur = t->next;
+    }
+    printf("\n");
+}

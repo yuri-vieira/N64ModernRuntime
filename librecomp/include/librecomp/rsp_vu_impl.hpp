@@ -21,7 +21,26 @@
 
 #include <cstdint>
 #include <algorithm>
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <intrin.h>
+#endif
 using u32 = uint32_t;
+
+// __builtin_clz is a GCC/Clang extension with no MSVC equivalent -- this
+// vector unit code was never previously compiled with MSVC (nothing linked
+// real RSP microcode into a native Windows/MSVC build before), so this
+// never came up until now. _BitScanReverse gives the same "count leading
+// zeros for a nonzero 32-bit value" result via the index of the highest set
+// bit.
+static inline u32 recomp_clz32(u32 value) {
+#if defined(_MSC_VER) && !defined(__clang__)
+    unsigned long index;
+    _BitScanReverse(&index, value);
+    return 31u - index;
+#else
+    return __builtin_clz(value);
+#endif
+}
 
 #define ACCH vpu.acch
 #define ACCM vpu.accm
@@ -1348,7 +1367,7 @@ auto RSP::VRCP(r128& vd, u8 de, cr128& vt) -> void {
     } else if (input == -32768) {
         result = 0xffff'0000;
     } else {
-        u32 shift = __builtin_clz(data);
+        u32 shift = recomp_clz32(data);
         u32 index = (u64(data) << shift & 0x7fc0'0000) >> 22;
         result = rspReciprocals[index];
         result = (0x10000 | result) << 14;
@@ -1400,7 +1419,7 @@ auto RSP::VRSQ(r128& vd, u8 de, cr128& vt) -> void {
     } else if (input == -32768) {
         result = 0xffff'0000;
     } else {
-        u32 shift = __builtin_clz(data);
+        u32 shift = recomp_clz32(data);
         u32 index = (u64(data) << shift & 0x7fc0'0000) >> 22;
         result = rspInverseSquareRoots[index & 0x1fe | shift & 1];
         result = (0x10000 | result) << 14;
